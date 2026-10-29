@@ -49,15 +49,20 @@ const MESSINESS_Z = 3;     // depth scatter (who overlaps whom)
 const SIZE_MIN = 0.6;      // smallest poster scale
 const SIZE_MAX = 1.05;     // largest poster scale
 
+// ---- Hover sound ----
+const HOVER_SOUND = 'hov.mp3';     // path to the sound (this puts it next to index.html)
+const HOVER_VOLUME = 0.6;          // 0 = silent, 1 = full volume
+const HOVER_SOUND_COOLDOWN = 70;   // minimum milliseconds between sounds, so sliding across overlaps isn't a buzz
+
 // ---- Performance ----
 const MAX_TEXTURE_SIZE = 512;   // posters are shrunk to this many pixels (longest side) on the GPU.
                                 // Lower = smoother. The full-size image still opens when you click.
 const MAX_PIXEL_RATIO = 1.25;   // render resolution cap (2 looks sharper but is much heavier)
 const MIN_PIXEL_RATIO = 0.75;   // the lowest the page will drop to if it still can't keep up
 const ADAPTIVE_RESOLUTION = true;  // automatically lowers resolution if the frame rate dips
-const VIDEO_TEXTURE_SIZE = 320; // video posters are drawn this small (longest side)
-const VIDEO_FPS = 15;           // video posters refresh this many times a second
-const LOAD_CONCURRENCY = 3;     // how many poster files load/decode at once
+const VIDEO_TEXTURE_SIZE = 360; // video posters are drawn this small (longest side)
+const VIDEO_FPS = 12;           // video posters refresh this many times a second
+const LOAD_CONCURRENCY = 2;     // how many poster files load/decode at once
 
 const SPROUT_TIME = 1.0;        // seconds each poster takes to travel out from the model
 const FOLLOW_STRENGTH = 0.9;    // how far everything turns with the mouse
@@ -66,7 +71,13 @@ const EASING = 0.06;            // lower = floatier
 /* ======================================================== */
 
 const mount = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+// Edge smoothing (MSAA) is expensive. On retina screens the extra pixels already hide jagged
+// edges, so it is only switched on for standard-density screens.
+const renderer = new THREE.WebGLRenderer({
+  antialias: devicePixelRatio <= 1,
+  stencil: false,
+  powerPreference: 'high-performance'
+});
 let pixelRatio = Math.min(devicePixelRatio, MAX_PIXEL_RATIO);
 renderer.setPixelRatio(pixelRatio);
 let forceRender = true;   // set to true whenever something changes that the loop can't detect on its own
@@ -231,6 +242,27 @@ function makePlaceholder(i) {
 
 const isVideoUrl = url => /\.(mp4|webm|mov)$/i.test(url);
 
+// Shrinks an image in gentle halving steps. One big jump looks jagged; steps stay smooth.
+function downscale(source, w, h, tw, th) {
+  let cur = source, cw = w, ch = h;
+  while (cw / 2 > tw && ch / 2 > th) {
+    const step = document.createElement('canvas');
+    step.width = Math.round(cw / 2);
+    step.height = Math.round(ch / 2);
+    const sctx = step.getContext('2d');
+    sctx.imageSmoothingQuality = 'high';
+    sctx.drawImage(cur, 0, 0, step.width, step.height);
+    cur = step; cw = step.width; ch = step.height;
+  }
+  const out = document.createElement('canvas');
+  out.width = tw;
+  out.height = th;
+  const octx = out.getContext('2d');
+  octx.imageSmoothingQuality = 'high';
+  octx.drawImage(cur, 0, 0, tw, th);
+  return out;
+}
+
 // Tries to load one URL as an image or a video.
 // Images are shrunk to MAX_TEXTURE_SIZE so the GPU has far less to upload and draw.
 function loadMedia(url) {
@@ -245,18 +277,15 @@ function loadMedia(url) {
       v.src = url;
     } else {
       const img = new Image();
-      img.onload = () => {
+      img.src = url;
+      // decode() does the heavy work off the main thread, so the page doesn't hitch while loading
+      img.decode().then(() => {
         const w = img.naturalWidth, h = img.naturalHeight;
         const r = Math.min(1, MAX_TEXTURE_SIZE / Math.max(w, h));
-        const c = document.createElement('canvas');
-        c.width = Math.max(1, Math.round(w * r));
-        c.height = Math.max(1, Math.round(h * r));
-        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        const c = downscale(img, w, h, Math.max(1, Math.round(w * r)), Math.max(1, Math.round(h * r)));
         img.src = '';   // let the full-size decode be garbage collected
         resolve({ type: 'image', el: c, w, h, url });
-      };
-      img.onerror = () => reject(new Error('image failed: ' + url));
-      img.src = url;
+      }).catch(() => reject(new Error('image failed: ' + url)));
     }
   });
 }
@@ -381,6 +410,10 @@ function applyMedia(mesh, media, s, isEnd, entry) {
   mesh.geometry.dispose();
   mesh.geometry = new THREE.PlaneGeometry(w, h);
 
+  // PNG / WebP / GIF can have transparent areas: honor them instead of drawing a solid background.
+  // (JPGs and videos stay opaque, which is cheaper to draw.)
+  const hasAlpha = media.type === 'image' && /\.(png|webp|gif)$/i.test(media.url);
+
   let tex;
   if (media.type === 'video') {
     const r = Math.min(1, VIDEO_TEXTURE_SIZE / Math.max(media.w, media.h));
@@ -388,6 +421,7 @@ function applyMedia(mesh, media, s, isEnd, entry) {
     vc.width = Math.max(1, Math.round(media.w * r));
     vc.height = Math.max(1, Math.round(media.h * r));
     const ctx = vc.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(media.el, 0, 0, vc.width, vc.height);
     tex = new THREE.CanvasTexture(vc);
     mesh.userData.vc = { canvas: vc, ctx, tex, video: media.el, last: 0 };
@@ -395,14 +429,20 @@ function applyMedia(mesh, media, s, isEnd, entry) {
     tex = new THREE.CanvasTexture(media.el);
   }
   tex.colorSpace = THREE.SRGBColorSpace;
+  // Premultiplied alpha stops dark/bright halos around cut-out edges when the poster is scaled down
+  if (hasAlpha) tex.premultiplyAlpha = true;
   renderer.initTexture(tex);   // upload to the GPU now (while loading), not at the moment the poster pops in
   mesh.material.map.dispose();
   mesh.material.map = tex;
-  // PNG / WebP / GIF can have transparent areas: honor them instead of drawing a solid background.
-  // (JPGs and videos stay opaque, which is cheaper to draw.)
-  const hasAlpha = /\.(png|webp|gif)$/i.test(media.url);
   mesh.material.transparent = hasAlpha;
   mesh.material.alphaTest = hasAlpha ? 0.02 : 0;   // drop fully transparent pixels so overlaps look clean
+  if (hasAlpha) {
+    // Blending that matches premultiplied textures
+    mesh.material.blending = THREE.CustomBlending;
+    mesh.material.blendEquation = THREE.AddEquation;
+    mesh.material.blendSrc = THREE.OneFactor;
+    mesh.material.blendDst = THREE.OneMinusSrcAlphaFactor;
+  }
   mesh.material.needsUpdate = true;
   forceRender = true;
 
@@ -424,11 +464,14 @@ list.forEach((entry, i) => addPoster(i, list.length, entry));
 
 /* ---------------- Custom cursor ---------------- */
 const cursorEl = document.getElementById('cursor');
+let cursorX = 0, cursorY = 0, cursorMoved = false, cursorShown = false;
+let cursorHover = false, cursorDrag = false;
 addEventListener('pointermove', e => {
-  cursorEl.style.transform = 'translate(' + e.clientX + 'px,' + e.clientY + 'px)';
-  cursorEl.style.opacity = 1;
+  cursorX = e.clientX;
+  cursorY = e.clientY;
+  cursorMoved = true;   // applied once per frame in the render loop
 });
-document.documentElement.addEventListener('mouseleave', () => { cursorEl.style.opacity = 0; });
+document.documentElement.addEventListener('mouseleave', () => { cursorEl.style.opacity = 0; cursorShown = false; });
 
 /* ---------------- Mouse follow + drag ---------------- */
 // Final rotation = (where the mouse is) + (how far you have dragged)
@@ -559,6 +602,41 @@ function setVideosPlaying(on) {
 document.getElementById('close').addEventListener('click', closeViewer);
 addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
 
+/* ---------------- Hover sound ---------------- */
+// Web Audio plays the sound with almost no delay and lets quick hovers overlap.
+let audioCtx = null;
+let hoverBuffer = null;
+let lastHoverSound = 0;
+let lastHovered = null;
+
+try {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  fetch(HOVER_SOUND)
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+    .then(data => audioCtx.decodeAudioData(data))
+    .then(buffer => { hoverBuffer = buffer; })
+    .catch(err => console.warn('Could not load the hover sound "' + HOVER_SOUND + '":', err.message || err));
+} catch (e) {
+  console.warn('Audio is not available in this browser.');
+}
+
+// Browsers keep audio locked until you click or press a key once on the page
+const unlockAudio = () => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); };
+['pointerdown', 'keydown', 'touchstart'].forEach(ev => addEventListener(ev, unlockAudio, { passive: true }));
+
+function playHoverSound() {
+  if (!audioCtx || !hoverBuffer || audioCtx.state !== 'running') return;
+  const t = performance.now();
+  if (t - lastHoverSound < HOVER_SOUND_COOLDOWN) return;
+  lastHoverSound = t;
+  const src = audioCtx.createBufferSource();
+  src.buffer = hoverBuffer;
+  const gain = audioCtx.createGain();
+  gain.gain.value = HOVER_VOLUME;
+  src.connect(gain).connect(audioCtx.destination);
+  src.start();
+}
+
 /* ---------------- Render loop ---------------- */
 const inv = new THREE.Quaternion();
 let frameCount = 0;
@@ -568,7 +646,7 @@ const easeOutBack = x => 1 + 2.70158 * Math.pow(x - 1, 3) + 1.70158 * Math.pow(x
 
 let lastTime = performance.now();
 let avgDt = 0.016;
-let cooldown = 120;   // frames to wait before the first resolution check
+let cooldown = 60;    // frames to wait before the first resolution check
 
 renderer.setAnimationLoop(() => {
   const nowMs = performance.now();
@@ -605,8 +683,16 @@ renderer.setAnimationLoop(() => {
   if (open || dragging) hoveredCache = null;
   else if (frameCount % 3 === 0) hoveredCache = pickPoster();
   const hovered = hoveredCache;
-  cursorEl.classList.toggle('drag', dragging);
-  cursorEl.classList.toggle('hover', !dragging && !!hovered);
+  if (hovered && hovered !== lastHovered) playHoverSound();   // just started hovering a new poster
+  lastHovered = hovered;
+  if (cursorMoved) {
+    cursorEl.style.transform = 'translate(' + cursorX + 'px,' + cursorY + 'px)';
+    if (!cursorShown) { cursorEl.style.opacity = 1; cursorShown = true; }
+    cursorMoved = false;
+  }
+  const wantHover = !dragging && !!hovered;
+  if (dragging !== cursorDrag) { cursorDrag = dragging; cursorEl.classList.toggle('drag', dragging); }
+  if (wantHover !== cursorHover) { cursorHover = wantHover; cursorEl.classList.toggle('hover', wantHover); }
 
   posterMeshes.forEach(m => {
     m.quaternion.copy(inv);
@@ -644,12 +730,12 @@ renderer.setAnimationLoop(() => {
     avgDt += (dt - avgDt) * 0.05;
     if (cooldown > 0) {
       cooldown--;
-    } else if (avgDt > 0.03 && pixelRatio > MIN_PIXEL_RATIO) {
+    } else if (avgDt > 0.021 && pixelRatio > MIN_PIXEL_RATIO) {
       pixelRatio = Math.max(MIN_PIXEL_RATIO, pixelRatio - 0.25);
       renderer.setPixelRatio(pixelRatio);
       renderer.setSize(innerWidth, innerHeight);
       avgDt = 0.016;
-      cooldown = 90;
+      cooldown = 60;
       forceRender = true;
       console.log('Frame rate dipped - render resolution lowered to', pixelRatio);
     }
