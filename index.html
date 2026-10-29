@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model + Posters</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="scene"></div>
+
+<!-- Custom crosshair cursor (follows the mouse; hidden on touch screens) -->
+<div id="cursor" aria-hidden="true">
+  <svg viewBox="0 0 48 48" fill="none">
+    <defs>
+      <g id="crosshair">
+        <rect x="21.75" y="2"     width="4.5" height="16" rx="2.25"/>   <!-- top -->
+        <rect x="21.75" y="30"    width="4.5" height="16" rx="2.25"/>   <!-- bottom -->
+        <rect x="2"     y="21.75" width="16"  height="4.5" rx="2.25"/>  <!-- left -->
+        <rect x="30"    y="21.75" width="16"  height="4.5" rx="2.25"/>  <!-- right -->
+        <circle cx="24" cy="24" r="2.2"/>                               <!-- center ring -->
+      </g>
+    </defs>
+    <!-- soft dark halo underneath so the white stays visible on light posters -->
+    <use href="#crosshair" stroke="#000" stroke-opacity="0.5" stroke-width="3.8"/>
+    <use href="#crosshair" stroke="#fff" stroke-width="1.6"/>
+  </svg>
+</div>
+
+<!-- Poster viewer (opens when you click a poster) -->
+<div id="viewer">
+  <button id="close" aria-label="Close">&times;</button>
+  <img id="big" alt="">
+  <video id="bigvideo" controls loop muted playsinline></video>
+  <div id="caption"></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="main.js"></script>
+
+</body>
+</html>
